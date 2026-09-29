@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Coach</title>
+<meta name="theme-color" content="#1D55A6">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{--bg:#EEF1F4;--surface:#fff;--ink:#15212B;--muted:#5B6B78;--line:#D0D8E0;--blue:#1D55A6;--red:#C0322B;--green:#2E7D4F}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:520px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:28px;margin:8px 0 4px}
+.card{background:var(--surface);border-radius:14px;padding:16px;margin:14px 0;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+label{display:block;font-size:13px;font-weight:600;color:var(--muted);margin:10px 0 4px}
+input{width:100%;font:inherit;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink)}
+button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:11px 16px;background:var(--blue);color:#fff;margin-top:12px;cursor:pointer}
+button.ghost{background:#E3E8EE;color:var(--ink)}
+button:disabled{opacity:.6}
+.muted{color:var(--muted);font-size:14px}
+.err{color:var(--red);font-size:14px;min-height:1em}
+.ok{color:var(--green);font-size:14px}
+#boot{display:flex;align-items:center;justify-content:center;min-height:80vh;color:var(--muted)}
+</style>
+</head>
+<body>
+<div id="boot">Loading your coach…</div>
+<main id="setup" hidden>
+  <h1>Set up Coach</h1>
+  <p class="muted">One-time setup on this phone. Your keys are stored only on this device.</p>
+  <section class="card">
+    <b>1. Cloud sync (GitHub)</b>
+    <p class="muted">Paste the GitHub token you made. The app uses it to sync your logs to your private repo and to fetch app updates.</p>
+    <label for="tok">GitHub token</label>
+    <input id="tok" type="password" autocomplete="off" placeholder="github_pat_…">
+    <div class="err" id="tokmsg"></div>
+  </section>
+  <section class="card">
+    <b>2. Claude (Anthropic API key)</b>
+    <p class="muted">From console.anthropic.com → API keys. This is what makes photo estimates and coach answers instant. You can add it later in Settings.</p>
+    <label for="key">API key</label>
+    <input id="key" type="password" autocomplete="off" placeholder="sk-ant-…">
+    <div class="err" id="keymsg"></div>
+  </section>
+  <button id="go">Connect</button>
+  <p class="muted" id="gomsg"></p>
+</main>
+<script>
+(function(){
+"use strict";
+const CFG_KEY="coach.cfg", REPO="coach-data";
+function cfg(){ try{ return JSON.parse(localStorage.getItem(CFG_KEY))||{}; }catch(e){ return {}; } }
+function setCfg(o){ const c={...cfg(),...o}; localStorage.setItem(CFG_KEY, JSON.stringify(c)); return c; }
+if("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
+
+/* app code cache (IndexedDB "coach-shell") */
+function shellDb(){ return new Promise((res,rej)=>{ const r=indexedDB.open("coach-shell",1); r.onupgradeneeded=()=>r.result.createObjectStore("code",{keyPath:"k"}); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
+async function getCode(){ try{ const d=await shellDb(); return await new Promise(res=>{ const q=d.transaction("code").objectStore("code").get("app"); q.onsuccess=()=>res(q.result||null); q.onerror=()=>res(null); }); }catch(e){ return null; } }
+async function putCode(v){ const d=await shellDb(); await new Promise((res,rej)=>{ const t=d.transaction("code","readwrite"); t.objectStore("code").put({k:"app",...v}); t.oncomplete=res; t.onerror=()=>rej(t.error); }); }
+async function fetchApp(c, etag){
+  const h={Authorization:"Bearer "+c.token, Accept:"application/vnd.github.raw", "X-GitHub-Api-Version":"2022-11-28"}; if(etag) h["If-None-Match"]=etag;
+  const r=await fetch(`https://api.github.com/repos/${c.owner}/${c.repo||REPO}/contents/app/app.html`,{headers:h, cache:"no-store"});
+  if(r.status===304) return null;
+  if(!r.ok){ const e=new Error("GitHub "+r.status); e.status=r.status; throw e; }
+  return {html:await r.text(), etag:r.headers.get("etag")||"", at:Date.now()};
+}
+function boot(html){ document.open(); document.write(html); document.close(); }
+
+async function start(){
+  const c=cfg();
+  if(!c.token||!c.owner){ showSetup(); return; }
+  const code=await getCode();
+  if(code&&code.html){
+    // start instantly from the cached copy, then check for an update in the background
+    const check=navigator.onLine? fetchApp(c, code.etag).then(n=>{ if(n){ return putCode(n).then(()=>{ setTimeout(()=>{ try{ window.toast && window.toast("App updated. Close and reopen to use the new version."); }catch(_){} }, 3000); }); } }).catch(()=>{}) : null;
+    boot(code.html); return check;
+  }
+  try{ const n=await fetchApp(c); await putCode(n); boot(n.html); }
+  catch(e){ document.getElementById("boot").textContent = navigator.onLine ? (e.status===401?"Your GitHub token was rejected. ":"Couldn't download the app ("+(e.message||"error")+"). ")+"Pull down to retry." : "Connect to the internet once to finish installing."; if(e.status===401) showSetup(); }
+}
+function showSetup(){
+  document.getElementById("boot").hidden=true; document.getElementById("setup").hidden=false;
+  const c=cfg(); if(c.token) document.getElementById("tok").value=c.token; if(c.key) document.getElementById("key").value=c.key;
+  document.getElementById("go").onclick=async()=>{
+    const btn=document.getElementById("go"), tok=document.getElementById("tok").value.trim(), key=document.getElementById("key").value.trim();
+    const tm=document.getElementById("tokmsg"), km=document.getElementById("keymsg"), gm=document.getElementById("gomsg");
+    tm.textContent=km.textContent=gm.textContent=""; if(!tok){ tm.textContent="Paste your GitHub token."; return; }
+    btn.disabled=true; btn.textContent="Connecting…";
+    try{
+      const u=await fetch("https://api.github.com/user",{headers:{Authorization:"Bearer "+tok}});
+      if(!u.ok){ tm.textContent="GitHub didn't accept that token. Copy it again (it starts with github_pat_)."; throw 0; }
+      const login=(await u.json()).login;
+      const rp=await fetch(`https://api.github.com/repos/${login}/${REPO}`,{headers:{Authorization:"Bearer "+tok}});
+      if(!rp.ok){ tm.textContent=`Signed in as ${login}, but the private repo "${REPO}" isn't there or the token can't see it. Ask Claude to finish setting it up.`; throw 0; }
+      if(key){
+        const m=await fetch("https://api.anthropic.com/v1/models?limit=100",{headers:{"x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"}});
+        if(!m.ok){ km.textContent=m.status===401?"That API key was rejected. Copy it again from console.anthropic.com.":"Couldn't check the API key ("+m.status+")."; throw 0; }
+        const ids=((await m.json()).data||[]).map(x=>x.id); const sonnet=ids.find(i=>/sonnet/i.test(i)), opus=ids.find(i=>/opus/i.test(i));
+        setCfg({key, model:sonnet||ids[0], modelBig:opus||sonnet||ids[0], models:ids.slice(0,20)});
+      }
+      setCfg({token:tok, owner:login, repo:REPO});
+      gm.className="ok"; gm.textContent="Connected. Downloading your app…";
+      const n=await fetchApp(cfg()); await putCode(n); boot(n.html);
+    }catch(e){ if(e&&e.message&&!tm.textContent&&!km.textContent) gm.textContent="Something went wrong: "+e.message; btn.disabled=false; btn.textContent="Connect"; }
+  };
+}
+start();
+})();
+</script>
+</body>
+</html>
